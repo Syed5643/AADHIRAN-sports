@@ -1,0 +1,1058 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SmashZone Arena · Badminton Court Booking</title>
+
+  <!-- Silence development warning for Tailwind CDN in production console -->
+  <script>
+    const _origWarn = console.warn;
+    console.warn = (...args) => {
+      if (typeof args[0] === 'string' && args[0].includes('cdn.tailwindcss.com')) return;
+      _origWarn(...args);
+    };
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+
+  <!-- React 18, Babel, Lucide & Supabase SDKs -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.383.0/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.0/dist/umd/supabase.min.js"></script>
+
+  <!-- Tailwind Configuration -->
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            display: ['Barlow Condensed', 'sans-serif'],
+            sans: ['DM Sans', 'sans-serif']
+          },
+          colors: {
+            ink: '#0B0F17',
+            panel: '#111827',
+            volt: '#84CC16',
+            cyanx: '#22D3EE'
+          }
+        }
+      }
+    };
+  </script>
+
+  <style>
+    body { background: #0B0F17; color: #e5e7eb; font-family: 'DM Sans', sans-serif; }
+    .scroll-x::-webkit-scrollbar { display: none; }
+    button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid #22D3EE; outline-offset: 2px; }
+    @media print {
+      body * { visibility: hidden; }
+      #pass, #pass * { visibility: visible; }
+      #pass { position: absolute; left: 0; top: 0; width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    /* =====================================================================
+       SUPABASE CONFIGURATION
+       1. Run the SQL schema from Admin -> "Database schema" in your Supabase SQL editor.
+       2. Insert your project URL and anon public key below.
+       ===================================================================== */
+    const SUPA = {
+      url: '', // Replace with your Project URL e.g. 'https://xyz.supabase.co'
+      key: ''  // Replace with your anon public key
+    };
+
+    const sb = (SUPA.url && SUPA.key && window.supabase) 
+      ? window.supabase.createClient(SUPA.url, SUPA.key) 
+      : null;
+
+    const z = n => String(n).padStart(2, '0');
+    const toRow = b => ({
+      booking_ref: b.ref,
+      court_id: b.court,
+      booking_date: b.date,
+      start_time: z(Math.min(...b.hours)) + ':00',
+      end_time: z(Math.max(...b.hours) + 1) + ':00',
+      player_name: b.name,
+      player_phone: b.phone,
+      skill_level: b.skill,
+      total_amount: b.amount,
+      payment_method: b.pay,
+      payment_status: b.paid ? 'paid' : 'pending',
+      collected_via: b.collect || null,
+      checked_in: b.checkedIn,
+      source: b.source,
+      status: b.status,
+      equipment_rentals: b.eq
+    });
+
+    const fromRow = r => {
+      const s = +r.start_time.slice(0, 2);
+      const e = +r.end_time.slice(0, 2);
+      return {
+        id: r.booking_ref,
+        ref: r.booking_ref,
+        court: r.court_id,
+        date: r.booking_date,
+        hours: Array.from({ length: e - s }, (_, i) => s + i),
+        name: r.player_name,
+        phone: r.player_phone,
+        skill: r.skill_level,
+        amount: r.total_amount,
+        pay: r.payment_method,
+        paid: r.payment_status === 'paid',
+        collect: r.collected_via,
+        checkedIn: r.checked_in,
+        source: r.source,
+        status: r.status,
+        eq: r.equipment_rentals || EMPTY_EQ
+      };
+    };
+
+    const db = {
+      async load() {
+        if (!sb) return null;
+        const [c, b] = await Promise.all([
+          sb.from('courts').select('*').order('id'),
+          sb.from('bookings').select('*')
+        ]);
+        if (c.error || b.error) throw (c.error || b.error);
+        return {
+          courts: c.data.map(x => ({
+            id: x.id,
+            name: x.name,
+            surface: x.surface_type,
+            light: x.lighting,
+            active: x.is_active,
+            lightOn: x.lights_on
+          })),
+          bookings: b.data.map(fromRow)
+        };
+      },
+      async save(b) {
+        if (sb) {
+          const { error } = await sb.from('bookings').insert(toRow(b));
+          if (error) throw error;
+        }
+      },
+      async patch(ref, p) {
+        if (sb) await sb.from('bookings').update(p).eq('booking_ref', ref);
+      },
+      async patchCourt(id, p) {
+        if (sb) await sb.from('courts').update(p).eq('id', id);
+      },
+      subscribe(cb) {
+        if (!sb) return () => {};
+        const ch = sb.channel('sz')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, cb)
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'courts' }, cb)
+          .subscribe();
+        return () => sb.removeChannel(ch);
+      }
+    };
+
+    const SQL_SCHEMA = `-- Aadhiran Sports academy · Supabase Schema
+create extension if not exists btree_gist;
+
+create table if not exists courts (
+  id int primary key,
+  name text not null,
+  surface_type text,
+  lighting text,
+  is_active boolean default true,
+  lights_on boolean default true
+);
+
+create table if not exists venue_settings (
+  id int primary key default 1,
+  peak_hours jsonb default '[[5,9],[17,23]]',
+  peak_rate int default 650,
+  non_peak_rate int default 400
+);
+
+create table if not exists bookings (
+  id uuid primary key default gen_random_uuid(),
+  booking_ref text unique not null,
+  court_id int references courts(id),
+  booking_date date not null,
+  start_time time not null,
+  end_time time not null,
+  player_name text,
+  player_phone text,
+  skill_level text,
+  total_amount int,
+  payment_method text,
+  payment_status text default 'pending',
+  collected_via text,
+  checked_in boolean default false,
+  source text default 'online',
+  status text default 'confirmed',
+  equipment_rentals jsonb default '{}',
+  created_at timestamptz default now()
+);
+
+insert into courts values
+ (1,'Court 1','BWF Certified Synthetic Mat','LED Flood',true,true),
+ (2,'Court 2','Teak Wood','Anti-glare LED',true,true),
+ (3,'Court 3','Air-Conditioned Pro (BWF Mat)','Pro LED + AC',true,true)
+on conflict (id) do nothing;
+
+insert into venue_settings default values on conflict do nothing;
+
+alter table courts enable row level security;
+alter table bookings enable row level security;
+create policy "read courts" on courts for select using (true);
+create policy "read bookings" on bookings for select using (true);
+create policy "create bookings" on bookings for insert with check (true);
+create policy "admin update bookings" on bookings for update using (true);
+create policy "admin update courts" on courts for update using (true);
+alter publication supabase_realtime add table bookings, courts;`;
+
+    /* ---------------------------- Constants ---------------------------- */
+    const { useState, useEffect, useMemo } = React;
+    const HOURS = Array.from({ length: 18 }, (_, i) => i + 5); // 5:00 AM to 10:00 PM (ends 11:00 PM)
+    const isPeak = h => h < 9 || h >= 17;
+    const RATE = { peak: 650, non: 400 };
+    const price = h => isPeak(h) ? RATE.peak : RATE.non;
+    const PR = { shoe: 50, racket: 70, nylon: 150, feather: 250 };
+    const SIZES = [6, 7, 8, 9, 10, 11];
+    const fmt = h => (h % 12 || 12) + (h < 12 || h === 24 ? ' AM' : ' PM');
+    const span = hs => fmt(Math.min(...hs)) + ' – ' + fmt(Math.max(...hs) + 1);
+    const dkey = d => `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`;
+    const DAYS = Array.from({ length: 8 }, (_, i) => { const d = new Date(); d.setDate(d.getDate() + i); return d; });
+    const TODAY = dkey(DAYS[0]);
+    const inr = n => '₹' + Number(n).toLocaleString('en-IN');
+
+    const COURTS = [
+      { id: 1, name: 'Court 1', surface: 'BWF Certified Synthetic Mat', light: 'LED Flood', active: true, lightOn: true },
+      { id: 2, name: 'Court 2', surface: 'Teak Wood', light: 'Anti-glare LED', active: true, lightOn: true },
+      { id: 3, name: 'Court 3', surface: 'Air-Conditioned Pro', light: 'Pro LED + AC', active: true, lightOn: false }
+    ];
+
+    const EMPTY_EQ = { shoes: [], std: 0, pro: 0, nylon: 0, feather: 0 };
+    const eqCost = e => e.shoes.length * PR.shoe + (e.std + e.pro) * PR.racket + e.nylon * PR.nylon + e.feather * PR.feather;
+    const eqLines = e => [
+      e.shoes.length && `Non-marking shoes ×${e.shoes.length} (UK ${e.shoes.join(', ')})`,
+      e.std && `Standard racket ×${e.std}`,
+      e.pro && `Yonex Pro Carbon racket ×${e.pro}`,
+      e.nylon && `Mavis 350 Nylon ×${e.nylon}`,
+      e.feather && `Aerosensa Feather ×${e.feather}`
+    ].filter(Boolean);
+
+    const mkRef = () => 'SZ-' + Math.random().toString(36).slice(2, 8).toUpperCase();
+
+    const seed = () => [
+      { ref: 'SZ-A1B2C3', court: 1, date: TODAY, hours: [18, 19], name: 'Rahul K', phone: '9840011122', skill: 'Advanced', amount: 1300, pay: 'online', paid: true, collect: null, checkedIn: false, source: 'online', status: 'confirmed', eq: { ...EMPTY_EQ } },
+      { ref: 'SZ-D4E5F6', court: 2, date: TODAY, hours: [19], name: 'Meena S', phone: '9840033344', skill: 'Beginner', amount: 700, pay: 'venue', paid: false, collect: null, checkedIn: false, source: 'online', status: 'confirmed', eq: { ...EMPTY_EQ, shoes: [7] } },
+      { ref: 'SZ-G7H8J9', court: 3, date: TODAY, hours: [6, 7], name: 'Arjun P', phone: '9840055566', skill: 'Intermediate', amount: 1300, pay: 'online', paid: true, collect: null, checkedIn: true, source: 'online', status: 'confirmed', eq: { ...EMPTY_EQ } }
+    ].map(b => ({ ...b, id: b.ref }));
+
+    /* ---------------------------- Reusable UI ---------------------------- */
+    /* ---------------------------- Reusable UI ---------------------------- */
+    const SVG_ICONS = {
+      Zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>',
+      Minus: '<line x1="5" y1="12" x2="19" y2="12"></line>',
+      Plus: '<line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line>',
+      X: '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>',
+      Backpack: '<path d="M4 10a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"></path><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path><path d="M8 21v-5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v5"></path><path d="M8 10h8"></path><path d="M8 18h8"></path>',
+      ChevronDown: '<polyline points="6 9 12 15 18 9"></polyline>',
+      Printer: '<polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect>',
+      Download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line>',
+      Share2: '<circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>',
+      Clock: '<circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline>',
+      Lightbulb: '<line x1="9" y1="18" x2="15" y2="18"></line><line x1="10" y1="22" x2="14" y2="22"></line><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5A4.61 4.61 0 0 1 8.91 14"></path>',
+      Database: '<ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>',
+      Check: '<polyline points="20 6 9 17 4 12"></polyline>',
+      Wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>',
+      Search: '<circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>'
+    };
+
+    const Icon = ({ n, s = 18, c = '' }) => {
+      const inner = SVG_ICONS[n] || '';
+      return (
+        <svg
+          width={s}
+          height={s}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className={c}
+          dangerouslySetInnerHTML={{ __html: inner }}
+        />
+      );
+    };
+
+    const Ctr = ({ v, on, min = 0 }) => (
+      <div className="flex items-center gap-2">
+        <button aria-label="Decrease" onClick={() => on(Math.max(min, v - 1))} className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 grid place-items-center">
+          <Icon n="Minus" s={14} />
+        </button>
+        <span className="w-5 text-center font-bold tabular-nums">{v}</span>
+        <button aria-label="Increase" onClick={() => on(v + 1)} className="w-8 h-8 rounded-full bg-volt text-black grid place-items-center">
+          <Icon n="Plus" s={14} />
+        </button>
+      </div>
+    );
+
+    const Modal = ({ title, onClose, children, wide }) => (
+      <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={onClose}>
+        <div onClick={e => e.stopPropagation()} className={`bg-panel border border-white/10 w-full ${wide ? 'max-w-3xl' : 'max-w-lg'} max-h-[92vh] overflow-y-auto rounded-t-2xl sm:rounded-2xl`}>
+          <div className="flex items-center justify-between px-5 py-4 border-b border-white/10 sticky top-0 bg-panel z-10">
+            <h3 className="font-display text-2xl font-bold tracking-wide">{title}</h3>
+            <button aria-label="Close" onClick={onClose} className="p-1 rounded hover:bg-white/10">
+              <Icon n="X" />
+            </button>
+          </div>
+          <div className="p-5">{children}</div>
+        </div>
+      </div>
+    );
+
+    const Field = ({ label, children }) => (
+      <label className="block mb-3">
+        <span className="text-xs text-slate-400 mb-1 block">{label}</span>
+        {children}
+      </label>
+    );
+
+    const inp = "w-full bg-ink border border-white/10 rounded-lg px-3 py-2.5 text-sm placeholder-slate-500 focus:outline-none focus:border-cyanx";
+
+    /* ---------------------------- Gear Drawer ---------------------------- */
+    function Gear({ eq, setEq }) {
+      const set = p => setEq({ ...eq, ...p });
+      const row = (label, sub, pr, k) => (
+        <div className="flex items-center justify-between py-2.5 border-b border-white/5 last:border-0">
+          <div>
+            <div className="text-sm font-medium">{label}</div>
+            <div className="text-xs text-slate-400">{sub} · {inr(pr)} each</div>
+          </div>
+          <Ctr v={eq[k]} on={v => set({ [k]: v })} />
+        </div>
+      );
+
+      return (
+        <details open className="bg-panel border border-white/10 rounded-2xl">
+          <summary className="cursor-pointer list-none flex items-center justify-between px-4 py-3 font-display text-xl font-bold">
+            <span className="flex items-center gap-2"><Icon n="Backpack" c="text-cyanx" />Gear &amp; Add-ons</span>
+            <Icon n="ChevronDown" s={16} />
+          </summary>
+          <div className="px-4 pb-4">
+            <div className="flex items-center justify-between py-2.5 border-b border-white/5">
+              <div>
+                <div className="text-sm font-medium">Non-marking shoes</div>
+                <div className="text-xs text-slate-400">{inr(PR.shoe)} per pair · size required</div>
+              </div>
+              <Ctr v={eq.shoes.length} on={v => set({ shoes: v > eq.shoes.length ? [...eq.shoes, ''] : eq.shoes.slice(0, v) })} />
+            </div>
+            {eq.shoes.map((s, i) => (
+              <div key={i} className="flex items-center justify-between py-2 pl-3 text-sm">
+                <span className="text-slate-300">Pair {i + 1} · UK size</span>
+                <select value={s} onChange={e => set({ shoes: eq.shoes.map((x, j) => j === i ? e.target.value : x) })} className={`bg-ink border rounded-lg px-2 py-1.5 ${s === '' ? 'border-rose-500' : 'border-white/10'}`}>
+                  <option value="">Select size</option>
+                  {SIZES.map(n => <option key={n} value={n}>UK {n}</option>)}
+                </select>
+              </div>
+            ))}
+            {row('Standard racket', 'Club-grade graphite', PR.racket, 'std')}
+            {row('Yonex Pro Carbon Graphite', 'Tournament level', PR.racket, 'pro')}
+            {row('Mavis 350 Nylon', 'Practice nylon shuttle', PR.nylon, 'nylon')}
+            {row('Aerosensa Feather', 'Match-grade feather shuttle', PR.feather, 'feather')}
+          </div>
+        </details>
+      );
+    }
+
+    /* ---------------------------- Summary ---------------------------- */
+    function Summary({ sel, court, eq }) {
+      const cc = sel.reduce((a, h) => a + price(h), 0);
+      const ec = eqCost(eq);
+      return (
+        <div className="bg-panel border border-white/10 rounded-2xl p-4">
+          <div className="font-display text-xl font-bold mb-2">Order Summary</div>
+          {!sel.length && <p className="text-sm text-slate-400">Pick one or more back-to-back hours on the grid to start.</p>}
+          {sel.map(h => (
+            <div key={h} className="flex justify-between text-sm py-0.5">
+              <span>{court.name} · {fmt(h)}–{fmt(h + 1)} <span className={isPeak(h) ? 'text-amber-300' : 'text-slate-400'}>({isPeak(h) ? 'peak' : 'off-peak'})</span></span>
+              <span>{inr(price(h))}</span>
+            </div>
+          ))}
+          {eqLines(eq).map(l => (
+            <div key={l} className="flex justify-between text-sm py-0.5 text-slate-300">
+              <span>{l}</span>
+            </div>
+          ))}
+          <div className="mt-2 pt-2 border-t border-white/10 text-sm space-y-0.5">
+            <div className="flex justify-between text-slate-400"><span>Court Total</span><span>{inr(cc)}</span></div>
+            <div className="flex justify-between text-slate-400"><span>Equipment Total</span><span>{inr(ec)}</span></div>
+            <div className="flex justify-between text-lg font-bold pt-1"><span>Total</span><span className="text-volt">{inr(cc + ec)}</span></div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ---------------------------- QR Generator ---------------------------- */
+    function QR({ seed: sd }) {
+      let h = 0;
+      for (const c of sd) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+      const N = 21, cells = [];
+      const finder = (x, y) => (x < 7 && y < 7) || (x > 13 && y < 7) || (x < 7 && y > 13);
+      const fin = (x, y) => {
+        const f = (a, b) => { const dx = Math.max(Math.abs(a - 3), Math.abs(b - 3)); return dx === 3 || dx === 0 || (dx <= 1); };
+        const ox = x > 13 ? x - 14 : x, oy = y > 13 ? y - 14 : y;
+        const d = Math.max(Math.abs(ox - 3), Math.abs(oy - 3));
+        return d === 3 || d <= 1;
+      };
+      for (let y = 0; y < N; y++) {
+        for (let x = 0; x < N; x++) {
+          let on;
+          if (finder(x, y)) on = fin(x, y);
+          else { h = (h * 1664525 + 1013904223) >>> 0; on = (h >>> 16) & 1; }
+          if (on) cells.push(<rect key={`${x}-${y}`} x={x} y={y} width="1" height="1" />);
+        }
+      }
+      return (
+        <svg viewBox="0 0 21 21" className="w-28 h-28 bg-white p-1.5 rounded-lg shrink-0" shapeRendering="crispEdges" fill="#0B0F17" role="img" aria-label="Match pass QR code">
+          {cells}
+        </svg>
+      );
+    }
+
+    /* ---------------------------- Match Pass Modal ---------------------------- */
+    function PassModal({ b, courts, onClose }) {
+      const court = courts.find(c => c.id === b.court);
+      const lines = eqLines(b.eq);
+      const dateLabel = new Date(b.date + 'T00:00').toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short' });
+      const wa = () => {
+        const t = `🏸 *Aadhiran Sports acadamy – Booking Confirmed*\nRef: ${b.ref}\n${court.name} (${court.surface})\n📅 ${dateLabel}\n⏰ ${span(b.hours)}\n${lines.length ? '🎒 ' + lines.join(', ') + '\n' : ''}Player: ${b.name} (${b.skill})\n\nVenue Rules: Mandatory non-marking shoes. Arrive 10 min early. Let's play! 💪`;
+        window.open('https://wa.me/?text=' + encodeURIComponent(t), '_blank');
+      };
+      const download = () => {
+        const el = document.getElementById('pass');
+        const html = `<!doctype html><meta charset="utf-8"><title>Match Pass ${b.ref}</title><script src="https://cdn.tailwindcss.com"><\/script><body style="background:#0B0F17;padding:16px;font-family:sans-serif">${el.outerHTML}</body>`;
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+        a.download = `match-pass-${b.ref}.html`;
+        a.click();
+      };
+
+      return (
+        <Modal title="Your Match Pass" onClose={onClose}>
+          <div id="pass" className="rounded-2xl overflow-hidden border border-volt/40 bg-gradient-to-br from-[#0f1a12] to-[#0B0F17] text-slate-100">
+            <div className="bg-volt text-black px-4 py-3 flex items-center justify-between">
+              <span className="font-display text-2xl font-extrabold tracking-wide">AADHIRAN SPORTS</span>
+              <span className="text-xs font-bold tracking-wider">{b.paid ? 'PAID' : 'PAY AT VENUE'}</span>
+            </div>
+            <div className="p-4 flex gap-4">
+              <div className="flex-1 space-y-1.5 text-sm">
+                <div className="text-xs text-slate-400">Booking Ref</div>
+                <div className="font-display text-3xl font-bold text-volt leading-none">{b.ref}</div>
+                <div className="pt-2"><span className="text-slate-400">Court</span> · <b>{court.name}</b> <span className="text-slate-400 text-xs">({court.surface})</span></div>
+                <div><span className="text-slate-400">Date</span> · <b>{dateLabel}</b></div>
+                <div><span className="text-slate-400">Time</span> · <b>{span(b.hours)}</b></div>
+                <div><span className="text-slate-400">Player</span> · <b>{b.name}</b> · {b.skill}</div>
+                {!b.paid && <div className="text-amber-300 font-bold">Amount Due: {inr(b.amount)}</div>}
+              </div>
+              <QR seed={b.ref} />
+            </div>
+            <div className="px-4 pb-3 text-sm">
+              <div className="text-xs text-slate-400">Equipment Included</div>
+              {lines.length ? lines.map(l => <div key={l} className="text-slate-200">{l}</div>) : <div className="text-slate-500">None</div>}
+            </div>
+            <div className="px-4 py-3 text-xs bg-white/5 border-t border-white/10 space-y-0.5">
+              <div className="font-bold text-cyanx">Venue Rules</div>
+              <div>• Non-marking shoes are strictly mandatory on synthetic & wooden courts.</div>
+              <div>• Please arrive 10 minutes prior to your booking window.</div>
+              <div>• Show this digital pass or your phone number at reception desk.</div>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-2 mt-4">
+            <button onClick={() => window.print()} className="bg-white/5 hover:bg-white/10 rounded-lg py-2.5 text-sm flex items-center justify-center gap-1.5">
+              <Icon n="Printer" s={16} />Print
+            </button>
+            <button onClick={download} className="bg-white/5 hover:bg-white/10 rounded-lg py-2.5 text-sm flex items-center justify-center gap-1.5">
+              <Icon n="Download" s={16} />Save
+            </button>
+            <button onClick={wa} className="bg-emerald-500 hover:bg-emerald-400 text-black font-bold rounded-lg py-2.5 text-sm flex items-center justify-center gap-1.5">
+              <Icon n="Share2" s={16} />WhatsApp
+            </button>
+          </div>
+        </Modal>
+      );
+    }
+
+    /* ---------------------------- Checkout Modal ---------------------------- */
+    function Checkout({ sel, court, date, eq, expiry, now, onCancel, onConfirm }) {
+      const [f, setF] = useState({ name: '', phone: '', skill: 'Intermediate', pay: 'online' });
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState(false);
+      const total = sel.reduce((a, h) => a + price(h), 0) + eqCost(eq);
+      const left = Math.max(0, Math.ceil((expiry - now) / 1000));
+
+      const go = () => {
+        if (f.name.trim().length < 2) return setErr('Enter the player’s full name.');
+        if (!/^\d{10}$/.test(f.phone)) return setErr('Enter a valid 10-digit WhatsApp number.');
+        setErr('');
+        if (f.pay === 'online') {
+          setBusy(true);
+          setTimeout(() => onConfirm({ ...f, paid: true }), 1400);
+        } else {
+          onConfirm({ ...f, paid: false });
+        }
+      };
+
+      return (
+        <Modal title="Checkout" onClose={onCancel}>
+          <div className="flex items-center justify-between bg-amber-500/10 border border-amber-500/40 text-amber-300 rounded-lg px-3 py-2 text-sm mb-4">
+            <span className="flex items-center gap-2"><Icon n="Clock" s={16} />{court.name} · {span(sel)} on hold</span>
+            <b className="tabular-nums">{Math.floor(left / 60)}:{z(left % 60)}</b>
+          </div>
+          <Field label="Full Name">
+            <input className={inp} value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder="e.g. Rahul Kumar" />
+          </Field>
+          <Field label="WhatsApp Number (Pass sent here)">
+            <input className={inp} inputMode="numeric" maxLength={10} value={f.phone} onChange={e => setF({ ...f, phone: e.target.value.replace(/\D/g, '') })} placeholder="10-digit mobile number" />
+          </Field>
+          <div className="mb-3">
+            <span className="text-xs text-slate-400 block mb-1">Skill Level</span>
+            <div className="flex gap-2">
+              {['Beginner', 'Intermediate', 'Advanced'].map(s => (
+                <button key={s} onClick={() => setF({ ...f, skill: s })} className={`flex-1 rounded-lg py-2 text-sm border ${f.skill === s ? 'bg-cyanx/15 border-cyanx text-cyanx font-bold' : 'border-white/10 text-slate-300'}`}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="mb-4">
+            <span className="text-xs text-slate-400 block mb-1">Payment Method</span>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                ['online', 'UPI / Online', 'Instant Match Pass'],
+                ['venue', 'Pay at Venue', 'Cash / UPI at reception']
+              ].map(([k, t, s]) => (
+                <button key={k} onClick={() => setF({ ...f, pay: k })} className={`text-left rounded-lg p-3 border ${f.pay === k ? 'bg-volt/10 border-volt' : 'border-white/10'}`}>
+                  <div className="font-bold text-sm">{t}</div>
+                  <div className="text-xs text-slate-400">{s}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+          {err && <div className="text-rose-400 text-sm mb-3" role="alert">{err}</div>}
+          <button disabled={busy || left === 0} onClick={go} className="w-full bg-volt text-black font-bold rounded-xl py-3.5 disabled:opacity-50">
+            {busy ? 'Processing UPI Payment…' : left === 0 ? 'Hold Expired' : f.pay === 'online' ? `Pay ${inr(total)} & Confirm` : `Confirm Booking · ${inr(total)} Due at Venue`}
+          </button>
+        </Modal>
+      );
+    }
+
+    /* ---------------------------- Walk-in Booking ---------------------------- */
+    function WalkIn({ courts, status, onClose, onSave }) {
+      const [f, setF] = useState({ court: 1, date: TODAY, start: new Date().getHours() < 5 ? 5 : Math.min(22, new Date().getHours() + 1), dur: 1, name: '', phone: '', shoes: 0, size: 8, collect: 'cash' });
+      const [err, setErr] = useState('');
+      const hours = Array.from({ length: f.dur }, (_, i) => f.start + i);
+
+      const submit = () => {
+        if (f.name.trim().length < 2) return setErr('Enter player name.');
+        if (f.start + f.dur > 23) return setErr('Booking must end by 11:00 PM.');
+        if (!hours.every(h => status(f.court, f.date, h).s === 'free')) return setErr('One or more of selected hours is already occupied on this court.');
+        const eq = { ...EMPTY_EQ, shoes: Array(f.shoes).fill(f.size) };
+        onSave({
+          court: +f.court,
+          date: f.date,
+          hours,
+          name: f.name.trim(),
+          phone: f.phone,
+          skill: 'Walk-in',
+          eq,
+          pay: 'venue',
+          paid: true,
+          collect: f.collect,
+          source: 'walkin'
+        });
+      };
+
+      const total = hours.reduce((a, h) => a + price(h), 0) + f.shoes * PR.shoe;
+
+      return (
+        <Modal title="Front Desk Walk-in Booking" onClose={onClose}>
+          <div className="grid grid-cols-2 gap-x-3">
+            <Field label="Court">
+              <select className={inp} value={f.court} onChange={e => setF({ ...f, court: +e.target.value })}>
+                {courts.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Date">
+              <select className={inp} value={f.date} onChange={e => setF({ ...f, date: e.target.value })}>
+                {DAYS.map((d, i) => <option key={i} value={dkey(d)}>{i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : d.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}</option>)}
+              </select>
+            </Field>
+            <Field label="Start Time">
+              <select className={inp} value={f.start} onChange={e => setF({ ...f, start: +e.target.value })}>
+                {HOURS.map(h => <option key={h} value={h}>{fmt(h)}</option>)}
+              </select>
+            </Field>
+            <Field label="Duration">
+              <select className={inp} value={f.dur} onChange={e => setF({ ...f, dur: +e.target.value })}>
+                {[1, 2, 3, 4].map(n => <option key={n} value={n}>{n} Hour{n > 1 ? 's' : ''}</option>)}
+              </select>
+            </Field>
+          </div>
+          <Field label="Player Name">
+            <input className={inp} value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder="Full name" />
+          </Field>
+          <Field label="Phone (Optional)">
+            <input className={inp} inputMode="numeric" maxLength={10} value={f.phone} onChange={e => setF({ ...f, phone: e.target.value.replace(/\D/g, '') })} placeholder="10-digit phone" />
+          </Field>
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <div className="text-sm font-medium">Shoe Rentals</div>
+              <select className="bg-ink border border-white/10 rounded px-2 py-1 text-xs mt-1" value={f.size} onChange={e => setF({ ...f, size: +e.target.value })}>
+                {SIZES.map(n => <option key={n} value={n}>UK {n}</option>)}
+              </select>
+            </div>
+            <Ctr v={f.shoes} on={v => setF({ ...f, shoes: v })} />
+          </div>
+          <div className="flex gap-2 mb-4">
+            {[['cash', 'Cash Collected'], ['upi', 'UPI at Counter']].map(([k, t]) => (
+              <button key={k} onClick={() => setF({ ...f, collect: k })} className={`flex-1 rounded-lg py-2 text-sm border ${f.collect === k ? 'bg-volt/10 border-volt font-bold text-volt' : 'border-white/10'}`}>
+                {t}
+              </button>
+            ))}
+          </div>
+          {err && <div className="text-rose-400 text-sm mb-3" role="alert">{err}</div>}
+          <button onClick={submit} className="w-full bg-volt text-black font-bold rounded-xl py-3">Book &amp; Collect {inr(total)}</button>
+        </Modal>
+      );
+    }
+
+    /* ---------------------------- Admin Dashboard ---------------------------- */
+    function Admin({ courts, bookings, status, actions, openWalkIn, openSchema }) {
+      const [q, setQ] = useState('');
+      const tb = bookings.filter(b => b.date === TODAY && b.status !== 'cancelled');
+      const sum = a => a.reduce((x, b) => x + b.amount, 0);
+      const online = sum(tb.filter(b => b.paid && b.pay === 'online'));
+      const cash = sum(tb.filter(b => b.paid && b.pay !== 'online' && b.collect === 'cash'));
+      const upi = sum(tb.filter(b => b.paid && b.pay !== 'online' && b.collect === 'upi'));
+      const pending = sum(tb.filter(b => !b.paid));
+      const shoes = tb.reduce((a, b) => a + b.eq.shoes.length, 0);
+      const res = q.trim() ? bookings.filter(b => b.status !== 'cancelled' && (b.phone.includes(q.trim()) || b.ref.toLowerCase().includes(q.trim().toLowerCase()))) : [];
+
+      const Stat = ({ l, v, c }) => (
+        <div className="bg-panel border border-white/10 rounded-xl p-3">
+          <div className="text-xs text-slate-400">{l}</div>
+          <div className={`font-display text-3xl font-bold ${c || ''}`}>{v}</div>
+        </div>
+      );
+
+      const Row = ({ b }) => (
+        <div className="flex flex-wrap items-center justify-between gap-2 bg-ink border border-white/10 rounded-xl p-3 text-sm">
+          <div>
+            <div className="font-bold">{b.name} <span className="text-slate-400 font-normal">· {b.phone || 'No phone'}</span></div>
+            <div className="text-xs text-slate-400">{b.ref} · {courts.find(c => c.id === b.court).name} · {b.date === TODAY ? 'Today' : b.date} {span(b.hours)} · {inr(b.amount)}</div>
+            <div className="mt-1 flex gap-1.5 text-[11px]">
+              <span className={`px-2 py-0.5 rounded-full ${b.paid ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'}`}>{b.paid ? 'Paid' : 'Due at Venue'}</span>
+              {b.checkedIn && <span className="px-2 py-0.5 rounded-full bg-cyanx/20 text-cyanx">Checked in</span>}
+            </div>
+          </div>
+          <div className="flex gap-1.5">
+            {!b.paid && (
+              <>
+                <button onClick={() => actions.collect(b.ref, 'cash')} className="px-2.5 py-1.5 rounded-lg bg-volt text-black text-xs font-bold">Cash</button>
+                <button onClick={() => actions.collect(b.ref, 'upi')} className="px-2.5 py-1.5 rounded-lg bg-cyanx text-black text-xs font-bold">UPI</button>
+              </>
+            )}
+            {!b.checkedIn && (
+              <button onClick={() => actions.checkin(b.ref)} className="px-2.5 py-1.5 rounded-lg bg-white/10 text-xs flex items-center gap-1">
+                <Icon n="Check" s={13} />Check in
+              </button>
+            )}
+            <button onClick={() => actions.cancel(b.ref)} className="px-2.5 py-1.5 rounded-lg bg-rose-500/20 text-rose-300 text-xs">Cancel</button>
+          </div>
+        </div>
+      );
+
+      return (
+        <div className="space-y-5">
+          <div className="flex flex-wrap gap-2 justify-between items-center">
+            <h2 className="font-display text-3xl font-bold">Front Desk &amp; Court Controls</h2>
+            <div className="flex gap-2">
+              <button onClick={openSchema} className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-sm flex items-center gap-1.5">
+                <Icon n="Database" s={15} />Database Schema
+              </button>
+              <button onClick={openWalkIn} className="px-3 py-2 rounded-lg bg-volt hover:bg-lime-400 text-black font-bold text-sm flex items-center gap-1.5">
+                <Icon n="Plus" s={15} />Walk-in Booking
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Stat l="Bookings Today" v={tb.length} />
+            <Stat l="Online Collections" v={inr(online)} c="text-cyanx" />
+            <Stat l={`Cash ${inr(cash)} · Desk UPI ${inr(upi)}`} v={inr(cash + upi)} c="text-volt" />
+            <Stat l={`Shoes Out · ${inr(pending)} Pending`} v={shoes} />
+          </div>
+
+          <div className="grid md:grid-cols-3 gap-3">
+            {courts.map(c => {
+              const used = HOURS.filter(h => status(c.id, TODAY, h).s === 'booked').length;
+              return (
+                <div key={c.id} className="bg-panel border border-white/10 rounded-2xl p-4">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <div className="font-display text-xl font-bold">{c.name}</div>
+                      <div className="text-xs text-slate-400">{c.surface}</div>
+                    </div>
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${c.active ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-600/40 text-slate-300'}`}>
+                      {c.active ? 'Open' : 'Blocked'}
+                    </span>
+                  </div>
+                  <div className="mt-3 text-xs text-slate-400 flex justify-between">
+                    <span>Occupancy</span><span>{used}/{HOURS.length} hrs</span>
+                  </div>
+                  <div className="h-2 bg-ink rounded-full mt-1 overflow-hidden">
+                    <div className="h-full bg-gradient-to-r from-volt to-cyanx" style={{ width: (used / HOURS.length * 100) + '%' }} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 mt-3">
+                    <button onClick={() => actions.court(c.id, 'lightOn')} className={`rounded-lg py-2 text-xs flex items-center justify-center gap-1.5 border ${c.lightOn ? 'bg-amber-400/15 border-amber-400/50 text-amber-300' : 'border-white/10 text-slate-400'}`}>
+                      <Icon n="Lightbulb" s={14} />Lights {c.lightOn ? 'ON' : 'OFF'}
+                    </button>
+                    <button onClick={() => actions.court(c.id, 'active')} className={`rounded-lg py-2 text-xs flex items-center justify-center gap-1.5 border ${c.active ? 'border-white/10' : 'bg-slate-600/40 border-slate-500'}`}>
+                      <Icon n="Wrench" s={14} />{c.active ? 'Block Court' : 'Unblock'}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="bg-panel border border-white/10 rounded-2xl p-4">
+            <div className="font-display text-xl font-bold mb-2">Gate Pass Verification</div>
+            <div className="relative">
+              <span className="absolute left-3 top-3 text-slate-500"><Icon n="Search" s={16} /></span>
+              <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search by phone number or pass ID (e.g. SZ-A1B2C3)" className={inp + ' pl-9'} />
+            </div>
+            <div className="space-y-2 mt-3">
+              {q.trim() && !res.length && <p className="text-sm text-slate-400">No active bookings match "{q}".</p>}
+              {res.map(b => <Row key={b.ref} b={b} />)}
+            </div>
+          </div>
+
+          <div>
+            <div className="font-display text-xl font-bold mb-2">Today's Schedule</div>
+            <div className="space-y-2">
+              {tb.length ? [...tb].sort((a, b) => a.hours[0] - b.hours[0]).map(b => <Row key={b.ref} b={b} />) : <p className="text-sm text-slate-400">No bookings yet for today.</p>}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ---------------------------- Root Application ---------------------------- */
+    function App() {
+      const saved = useMemo(() => { try { return JSON.parse(localStorage.getItem('sz_v1')); } catch (e) { return null; } }, []);
+      const [courts, setCourts] = useState(saved?.courts || COURTS);
+      const [bookings, setBookings] = useState(saved?.bookings || seed());
+      const [holds, setHolds] = useState([]);
+      const [role, setRole] = useState('player');
+      const [dateI, setDateI] = useState(0);
+      const [cid, setCid] = useState(1);
+      const [sel, setSel] = useState([]);
+      const [eq, setEq] = useState(EMPTY_EQ);
+      const [modal, setModal] = useState(null);
+      const [pass, setPass] = useState(null);
+      const [expiry, setExpiry] = useState(0);
+      const [now, setNow] = useState(Date.now());
+      const [toast, setToast] = useState('');
+
+      const date = dkey(DAYS[dateI]);
+      const court = courts.find(c => c.id === cid) || courts[0];
+      const flash = m => { setToast(m); setTimeout(() => setToast(''), 2600); };
+
+      useEffect(() => {
+        try { localStorage.setItem('sz_v1', JSON.stringify({ courts, bookings })); } catch (e) {}
+      }, [courts, bookings]);
+
+      useEffect(() => {
+        const t = setInterval(() => setNow(Date.now()), 1000);
+        return () => clearInterval(t);
+      }, []);
+
+      useEffect(() => {
+        if (!sb) return;
+        const pull = () => db.load().then(r => {
+          if (r) {
+            setCourts(r.courts);
+            setBookings(r.bookings);
+          }
+        }).catch(e => flash('Cloud sync failed: ' + e.message));
+        pull();
+        return db.subscribe(pull);
+      }, []);
+
+      useEffect(() => {
+        setHolds(h => h.filter(x => x.exp > now));
+      }, [now]);
+
+      useEffect(() => {
+        if (modal === 'checkout' && expiry && now >= expiry) {
+          release();
+          setModal(null);
+          flash('Slot hold expired. Please reselect your slots.');
+        }
+      }, [now]);
+
+      const curHour = new Date().getHours();
+      const status = (c, d, h) => {
+        const ct = courts.find(x => x.id === c);
+        if (!ct || !ct.active) return { s: 'maint' };
+        const b = bookings.find(b => b.court === c && b.date === d && b.status !== 'cancelled' && b.hours.includes(h));
+        if (b) return { s: 'booked', b };
+        if (d === TODAY && h < curHour) return { s: 'past' };
+        if (c === cid && d === date && sel.includes(h)) return { s: modal === 'checkout' ? 'held' : 'sel' };
+        if (holds.some(x => x.court === c && x.date === d && x.hour === h)) return { s: 'held' };
+        return { s: 'free' };
+      };
+
+      const pickSlot = h => {
+        const mn = Math.min(...sel);
+        const mx = Math.max(...sel);
+        if (sel.includes(h)) {
+          setSel(h === mn || h === mx ? sel.filter(x => x !== h) : [h]);
+        } else if (!sel.length || h === mn - 1 || h === mx + 1) {
+          setSel([...sel, h].sort((a, b) => a - b));
+        } else {
+          setSel([h]);
+        }
+      };
+
+      const changeCourt = id => { setCid(id); setSel([]); };
+      const changeDate = i => { setDateI(i); setSel([]); };
+      const release = () => setHolds(h => h.filter(x => !(x.court === cid && x.date === date && sel.includes(x.hour))));
+      const shoesOk = eq.shoes.every(s => s !== '');
+      const total = sel.reduce((a, h) => a + price(h), 0) + eqCost(eq);
+
+      const startCheckout = () => {
+        if (!sel.length) return flash('Select at least one hour first.');
+        if (!shoesOk) return flash('Choose a UK size for every shoe pair.');
+        const exp = Date.now() + 5 * 60 * 1000;
+        setHolds(h => [...h, ...sel.map(hour => ({ court: cid, date, hour, exp }))]);
+        setExpiry(exp);
+        setModal('checkout');
+      };
+
+      const cancelCheckout = () => { release(); setModal(null); };
+
+      const addBooking = async b => {
+        const bk = { id: mkRef(), checkedIn: false, status: 'confirmed', collect: null, skill: '—', phone: '', ...b };
+        bk.ref = bk.id;
+        bk.amount = bk.hours.reduce((a, h) => a + price(h), 0) + eqCost(bk.eq);
+
+        if (bk.hours.some(h => bookings.some(x => x.court === bk.court && x.date === bk.date && x.status !== 'cancelled' && x.hours.includes(h)))) {
+          flash('Sorry, someone just booked that slot.');
+          return null;
+        }
+
+        setBookings(p => [...p, bk]);
+        try { await db.save(bk); } catch (e) { flash('Saved locally. Cloud error: ' + e.message); }
+        return bk;
+      };
+
+      const confirmPlayer = async f => {
+        const bk = await addBooking({
+          court: cid,
+          date,
+          hours: sel,
+          name: f.name.trim(),
+          phone: f.phone,
+          skill: f.skill,
+          eq,
+          pay: f.pay,
+          paid: f.paid,
+          source: 'online'
+        });
+        release();
+        setSel([]);
+        setEq(EMPTY_EQ);
+        if (bk) {
+          setPass(bk);
+          setModal('pass');
+        } else {
+          setModal(null);
+        }
+      };
+
+      const upd = (ref, p, row) => {
+        setBookings(b => b.map(x => x.ref === ref ? { ...x, ...p } : x));
+        db.patch(ref, row);
+      };
+
+      const actions = {
+        collect: (ref, how) => { upd(ref, { paid: true, collect: how }, { payment_status: 'paid', collected_via: how }); flash('Payment recorded'); },
+        checkin: ref => { upd(ref, { checkedIn: true }, { checked_in: true }); flash('Player checked in'); },
+        cancel: ref => {
+          if (confirm('Cancel this booking and free up the court slot?')) {
+            upd(ref, { status: 'cancelled' }, { status: 'cancelled' });
+            flash('Booking cancelled');
+          }
+        },
+        court: (id, k) => {
+          const c = courts.find(x => x.id === id);
+          setCourts(cs => cs.map(x => x.id === id ? { ...x, [k]: !x[k] } : x));
+          db.patchCourt(id, k === 'active' ? { is_active: !c.active } : { lights_on: !c.lightOn });
+          if (k === 'active' && c.active && cid === id) setSel([]);
+        }
+      };
+
+      const slotCls = {
+        free: 'bg-emerald-500/10 border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/20',
+        sel: 'bg-volt border-lime-300 text-black font-bold scale-[1.03]',
+        held: 'bg-amber-500/15 border-amber-500/60 text-amber-300 cursor-not-allowed',
+        booked: 'bg-rose-500/10 border-rose-500/50 text-rose-300 cursor-not-allowed',
+        maint: 'bg-slate-700/40 border-slate-600 text-slate-400 cursor-not-allowed',
+        past: 'bg-ink border-white/5 text-slate-600 cursor-not-allowed'
+      };
+
+      const mask = b => b.name[0].toUpperCase() + '•••' + b.ref.slice(-3);
+
+      return (
+        <div className="min-h-screen pb-28 md:pb-10">
+          <header className="sticky top-0 z-30 bg-ink/90 backdrop-blur border-b border-white/10">
+            <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-9 h-9 rounded-lg bg-volt text-black grid place-items-center">
+                  <Icon n="Zap" s={20} />
+                </div>
+                <div>
+                  <div className="font-display text-2xl font-extrabold leading-none tracking-wide">AADHIRAN SPORTS</div>
+                  <div className="text-[11px] text-slate-400 leading-tight">{sb ? 'Live Cloud Sync Active' : 'Offline Mode · Saved Locally'}</div>
+                </div>
+              </div>
+              <div className="flex bg-panel rounded-full p-1 border border-white/10 text-sm">
+                {[
+                  ['player', 'Player View'],
+                  ['admin', 'Front Desk']
+                ].map(([k, t]) => (
+                  <button key={k} onClick={() => setRole(k)} className={`px-3.5 py-1.5 rounded-full transition ${role === k ? 'bg-cyanx text-black font-bold' : 'text-slate-300 hover:text-white'}`}>
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-6xl mx-auto px-4 pt-5">
+            {role === 'admin' ? (
+              <Admin courts={courts} bookings={bookings} status={status} actions={actions} openWalkIn={() => setModal('walkin')} openSchema={() => setModal('schema')} />
+            ) : (
+              <div className="grid md:grid-cols-[1fr_340px] gap-5 items-start">
+                <section className="space-y-4 min-w-0">
+                  <div>
+                    <h1 className="font-display text-4xl sm:text-5xl font-extrabold leading-none">Book a Court</h1>
+                    <p className="text-slate-400 text-sm mt-1">Select date, court, and consecutive hours. Peak {inr(RATE.peak)}/hr · Off-peak {inr(RATE.non)}/hr.</p>
+                  </div>
+                  <div className="flex gap-2 overflow-x-auto scroll-x -mx-4 px-4">
+                    {DAYS.map((d, i) => (
+                      <button key={i} onClick={() => changeDate(i)} className={`shrink-0 w-[68px] rounded-xl py-2 border text-center transition ${dateI === i ? 'bg-volt text-black border-volt font-bold' : 'border-white/10 bg-panel text-slate-200'}`}>
+                        <div className="text-xs">{i === 0 ? 'Today' : i === 1 ? 'Tmrw' : d.toLocaleDateString('en-IN', { weekday: 'short' })}</div>
+                        <div className="font-display text-2xl leading-none">{d.getDate()}</div>
+                        <div className="text-[10px] opacity-70">{d.toLocaleDateString('en-IN', { month: 'short' })}</div>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="grid sm:grid-cols-3 gap-2">
+                    {courts.map(c => (
+                      <button key={c.id} onClick={() => changeCourt(c.id)} className={`text-left rounded-xl p-3 border transition ${cid === c.id ? 'border-cyanx bg-cyanx/10' : 'border-white/10 bg-panel'}`}>
+                        <div className="flex justify-between items-center">
+                          <span className="font-display text-xl font-bold">{c.name}</span>
+                          {!c.active && <span className="text-[11px] bg-slate-600/50 px-2 rounded-full">Maintenance</span>}
+                        </div>
+                        <div className="text-xs text-slate-300">{c.surface}</div>
+                        <div className="text-xs text-slate-500 flex items-center gap-1 mt-0.5"><Icon n="Lightbulb" s={12} />{c.light}</div>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-300">
+                    {[
+                      ['bg-emerald-500', 'Available'],
+                      ['bg-volt', 'Selected'],
+                      ['bg-amber-500', 'On Hold (Checkout)'],
+                      ['bg-rose-500', 'Booked'],
+                      ['bg-slate-500', 'Maintenance']
+                    ].map(([c, t]) => (
+                      <span key={t} className="flex items-center gap-1.5"><i className={`w-2.5 h-2.5 rounded-sm ${c}`} />{t}</span>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-2">
+                    {HOURS.map(h => {
+                      const st = status(cid, date, h);
+                      const can = st.s === 'free' || st.s === 'sel';
+                      return (
+                        <button key={h} disabled={!can} onClick={() => pickSlot(h)} aria-label={`${fmt(h)} to ${fmt(h + 1)} ${st.s}`} className={`rounded-xl border px-2 py-2.5 text-center transition ${slotCls[st.s]}`}>
+                          <div className="text-sm font-bold">{fmt(h)}</div>
+                          <div className="text-[11px] mt-0.5">{st.s === 'booked' ? mask(st.b) : st.s === 'maint' ? 'Closed' : st.s === 'held' ? 'On hold' : st.s === 'past' ? 'Passed' : inr(price(h))}</div>
+                          {(st.s === 'free' || st.s === 'sel') && <div className="text-[10px] opacity-70">{isPeak(h) ? 'peak' : 'off-peak'}</div>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs text-slate-500">Tip: Click adjacent hours to extend booking. Click the first or last hour to deselect.</p>
+                </section>
+
+                <aside className="space-y-4 md:sticky md:top-20">
+                  <Gear eq={eq} setEq={setEq} />
+                  <Summary sel={sel} court={court} eq={eq} />
+                  {!shoesOk && <p className="text-xs text-rose-400">Please choose a UK size for every rented shoe pair.</p>}
+                  <button onClick={startCheckout} className="hidden md:block w-full bg-volt hover:bg-lime-400 text-black font-bold rounded-xl py-3.5 transition">
+                    Continue to Checkout
+                  </button>
+                </aside>
+              </div>
+            )}
+          </main>
+
+          {role === 'player' && (
+            <div className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-ink/95 backdrop-blur border-t border-white/10 p-3 flex items-center gap-3">
+              <div className="flex-1">
+                <div className="text-xs text-slate-400">{sel.length ? `${court.name} · ${span(sel)}` : 'No slots selected'}</div>
+                <div className="font-display text-2xl font-bold text-volt leading-none">{inr(total)}</div>
+              </div>
+              <button onClick={startCheckout} className="bg-volt text-black font-bold rounded-xl px-6 py-3">
+                Checkout
+              </button>
+            </div>
+          )}
+
+          {modal === 'checkout' && <Checkout sel={sel} court={court} date={date} eq={eq} expiry={expiry} now={now} onCancel={cancelCheckout} onConfirm={confirmPlayer} />}
+          {modal === 'pass' && pass && <PassModal b={pass} courts={courts} onClose={() => setModal(null)} />}
+          {modal === 'walkin' && <WalkIn courts={courts} status={status} onClose={() => setModal(null)} onSave={async b => { const bk = await addBooking(b); if (bk) { setModal(null); setPass(bk); setModal('pass'); flash('Walk-in booking saved'); } }} />}
+          {modal === 'schema' && (
+            <Modal wide title="Supabase Database Schema" onClose={() => setModal(null)}>
+              <p className="text-sm text-slate-400 mb-3">Copy and run this in your Supabase SQL Editor. It will create all tables, indexes, and real-time triggers.</p>
+              <pre className="bg-ink border border-white/10 rounded-lg p-3 text-xs overflow-x-auto max-h-[55vh] text-slate-300 font-mono">{SQL_SCHEMA}</pre>
+              <button onClick={() => { navigator.clipboard && navigator.clipboard.writeText(SQL_SCHEMA); flash('SQL Schema copied to clipboard'); }} className="mt-3 px-4 py-2 rounded-lg bg-volt text-black font-bold text-sm">
+                Copy SQL
+              </button>
+            </Modal>
+          )}
+
+          {toast && <div role="status" className="fixed top-16 left-1/2 -translate-x-1/2 z-[60] bg-white text-black text-sm font-bold px-4 py-2 rounded-full shadow-2xl animate-fade-in">{toast}</div>}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
